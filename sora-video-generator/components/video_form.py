@@ -1,8 +1,62 @@
 """영상 생성 폼 컴포넌트."""
 
-from typing import Optional
+import io
+from typing import Optional, Tuple
 
 import streamlit as st
+from PIL import Image
+
+
+def _resize_image_to_resolution(image_bytes: bytes, target_size: str) -> Tuple[bytes, str]:
+    """이미지를 목표 해상도에 맞게 리사이즈합니다.
+
+    Args:
+        image_bytes: 원본 이미지 바이트.
+        target_size: 목표 해상도 (예: "1280x720").
+
+    Returns:
+        (리사이즈된 이미지 바이트, MIME 타입) 튜플.
+    """
+    # 목표 해상도 파싱
+    width, height = map(int, target_size.split("x"))
+
+    # 이미지 열기
+    img = Image.open(io.BytesIO(image_bytes))
+
+    # RGBA인 경우 RGB로 변환 (JPEG 호환성)
+    if img.mode == "RGBA":
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[3])
+        img = background
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    # 원본 비율 계산
+    orig_width, orig_height = img.size
+    orig_ratio = orig_width / orig_height
+    target_ratio = width / height
+
+    # 비율에 맞게 크롭 후 리사이즈
+    if orig_ratio > target_ratio:
+        # 원본이 더 넓음 - 좌우 크롭
+        new_width = int(orig_height * target_ratio)
+        left = (orig_width - new_width) // 2
+        img = img.crop((left, 0, left + new_width, orig_height))
+    elif orig_ratio < target_ratio:
+        # 원본이 더 높음 - 상하 크롭
+        new_height = int(orig_width / target_ratio)
+        top = (orig_height - new_height) // 2
+        img = img.crop((0, top, orig_width, top + new_height))
+
+    # 목표 해상도로 리사이즈
+    img = img.resize((width, height), Image.Resampling.LANCZOS)
+
+    # 바이트로 변환
+    output = io.BytesIO()
+    img.save(output, format="JPEG", quality=95)
+    output.seek(0)
+
+    return output.getvalue(), "image/jpeg"
 
 
 def render_video_form(settings: dict) -> Optional[dict]:
@@ -103,11 +157,12 @@ def _render_image_form(settings: dict) -> Optional[dict]:
         uploaded_file = st.file_uploader(
             "이미지 업로드",
             type=["jpg", "jpeg", "png", "webp"],
-            help="이미지가 첫 프레임으로 사용됩니다. 선택한 해상도와 일치해야 합니다."
+            help="이미지가 첫 프레임으로 사용됩니다. 자동으로 선택한 해상도에 맞게 변환됩니다."
         )
 
         if uploaded_file:
-            st.image(uploaded_file, caption="미리보기", use_container_width=True)
+            st.image(uploaded_file, caption="원본 미리보기", use_container_width=True)
+            st.caption(f"선택한 해상도({settings['size']})에 맞게 자동 변환됩니다.")
 
         prompt = st.text_area(
             "프롬프트",
@@ -119,7 +174,7 @@ def _render_image_form(settings: dict) -> Optional[dict]:
         # 주의사항
         st.info("""
         **주의사항:**
-        - 이미지 해상도는 선택한 영상 크기와 일치해야 합니다
+        - 이미지는 자동으로 선택한 해상도에 맞게 변환됩니다
         - 사람 얼굴이 포함된 이미지는 거부될 수 있습니다
         - 지원 형식: JPEG, PNG, WebP
         """)
@@ -142,10 +197,18 @@ def _render_image_form(settings: dict) -> Optional[dict]:
                 return None
 
             # 이미지 바이트 읽기
-            image_bytes = uploaded_file.read()
+            original_bytes = uploaded_file.read()
 
-            # MIME 타입 결정
-            mime_type = uploaded_file.type or "image/jpeg"
+            # 선택한 해상도에 맞게 이미지 리사이즈
+            try:
+                image_bytes, mime_type = _resize_image_to_resolution(
+                    original_bytes,
+                    settings["size"]
+                )
+                st.success(f"이미지가 {settings['size']} 해상도로 변환되었습니다.")
+            except Exception as e:
+                st.error(f"이미지 변환 실패: {str(e)}")
+                return None
 
             return {
                 "prompt": prompt,
